@@ -50,6 +50,7 @@ def process_audio_files(annotations_path, audio_dir, output_dir):
         else:
             print(f"Audio file not found: {audio_path}")
 
+
 if __name__ == '__main__':
     annotations_path = "../dataset/3s_segment_annotations.csv"
     audio_dir = "../dataset/3s_segments"
