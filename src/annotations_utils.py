@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
+from collections import Counter
 
 # # 38074 - segments
 # # 41462 - annotrations in the csv file
@@ -75,10 +76,13 @@ if __name__ == "__main__":
     spectrogram_dir = "../dataset/mel_spectrograms"
     output_csv = "../dataset/mel_spectrogram_annotations.csv"
     embeddings_dir = "../dataset/embeddings"
-
+    segment_annotations = "../dataset/_segment_annotations.csv"
+    embedding_annotations = "../dataset/_embedding_annotations.csv"
+    segments_dir = "../dataset/3s_segments"
     # annotations_from_spectrograms(spectrogram_dir, output_csv)
     # check_embeddings(embeddings_dir)
+    # embeddings, file_names = load_embeddings(embeddings_dir)
+    # #they look quite okay 
+    # tsne_embeddings(embeddings, file_names)
 
-    embeddings, file_names = load_embeddings(embeddings_dir)
-    #they look quite okay 
-    tsne_embeddings(embeddings, file_names)
+    
