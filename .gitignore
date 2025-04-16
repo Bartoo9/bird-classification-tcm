@@ -2,3 +2,7 @@ dataset
 visualizations
 src/BirdNET_GLOBAL_6K_V2.4_Labels_af.txt
 src/BirdNET_GLOBAL_6K_V2.4_Model_FP16.tflite
+src/birdnet_last_layer.pkl
+src/__pycache__
+src/focal_loss.py
+results
