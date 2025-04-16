@@ -4,16 +4,9 @@
 import bioacoustics_model_zoo as bmz
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import classification_report, average_precision_score, roc_auc_score
 import numpy as np
 import pandas as pd
 import os
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.metrics import confusion_matrix
-import multiprocessing as mp
-from tqdm import tqdm
-from functools import partial
 from focal_loss import FocalLoss
 from eval_model import evaluate_model
 
@@ -64,22 +57,32 @@ def birdnet_baseline(embeddings_dir, annotations_path, output_dir=None,
     
     X = np.array(X)
 
-    #robust scaler to normalize the data
-    from sklearn.preprocessing import RobustScaler
-    scaler = RobustScaler()
-    X = scaler.fit_transform(X)
-
     label_encoder = LabelEncoder()
     y_encoded = label_encoder.fit_transform(y)
 
-    #split the data 
+    from imblearn.over_sampling import SMOTE
+
+    #split the data (keep test set pure)
     X_temp, X_test, y_temp, y_test = train_test_split(
         X, y_encoded, test_size=0.1, random_state=2, stratify=y_encoded)
     
+    smote = SMOTE(random_state=2, k_neighbors=5)
+    X_temp_resampled , y_temp_resampled = smote.fit_resample(X_temp, y_temp)
+
+    print("Original class distribution:", np.bincount(y_temp))
+    print("Balanced class distribution:", np.bincount(y_temp_resampled))
+
     X_train, X_val, y_train, y_val = train_test_split(
-        X_temp, y_temp, test_size=0.1, random_state=2, stratify=y_temp)
+        X_temp_resampled, y_temp_resampled, test_size=0.1, random_state=2, stratify=y_temp_resampled)
     
     print(f"Data split: {len(X_train)} train, {len(X_val)} validation, {len(X_test)} test")
+
+    #robust scaler to normalize the data
+    from sklearn.preprocessing import RobustScaler
+    scaler = RobustScaler()
+    X_train = scaler.fit_transform(X_train)
+    X_val = scaler.transform(X_val)
+    X_test = scaler.transform(X_test)
 
     from sklearn.utils.class_weight import compute_class_weight
     class_weights = compute_class_weight(
@@ -189,27 +192,30 @@ def birdnet_baseline(embeddings_dir, annotations_path, output_dir=None,
     import torch
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    #try to adress imbalanced data 
-    scale = 2.0
-    scaled_weights = np.power(class_weights, scale)
-    scaled_weights = scaled_weights/np.min(scaled_weights)
-
     #depending how aggresive we want scaling to be 
     if scale_weights:
         print("Using scaled class weights")
-        balanced_weights = torch.FloatTensor([scaled_weights[i] for i in range(len(scaled_weights))])
+        class_counts = np.bincount(y_train)
+        class_weights = np.sqrt(class_counts.max() / class_counts)
+
+        scale = 0.5
+        class_weights = np.power(class_weights, scale)
+        class_weights = class_weights/np.mean(class_weights)
+        balanced_weights = torch.FloatTensor(class_weights).to(device)
+        print(f"Class weights range: {class_weights.min():.2f} to {class_weights.max():.2f}")
     else:
-        balanced_weights = torch.FloatTensor([class_weights[i] for i in range(len(class_weights))])
+        balanced_weights = None
 
     if focal_loss:
         print("Using focal loss")
-        criterion = FocalLoss(gamma=2.0, alpha=None, reduction='mean')
+        criterion = FocalLoss(gamma=2.0, alpha=0.25, reduction='mean')
     else:
         criterion = torch.nn.BCEWithLogitsLoss(pos_weight=balanced_weights)
 
-    optimizer = torch.optim.Adam(birdnet.network.parameters(), 
-                                 lr=0.0005, weight_decay=0.001)
+    optimizer = torch.optim.AdamW(birdnet.network.parameters(), 
+                                 lr=0.001, weight_decay=0.01)
 
+    #fit it to the data
     from opensoundscape.ml.shallow_classifier import quick_fit
 
     quick_fit(
@@ -247,8 +253,10 @@ def birdnet_baseline(embeddings_dir, annotations_path, output_dir=None,
 if __name__ == "__main__":
     embeddings_dir = "../dataset/embeddings"
     annotations_path = "../dataset/_embedding_annotations.csv"
+    models = ['log_reg', 'one_layer', 'birdnet']
 
-    birdnet_baseline(embeddings_dir, annotations_path, subset=True,
+    for model in models:
+        birdnet_baseline(embeddings_dir, annotations_path, subset=True,
                      output_dir="../results/birdnet_baseline_results",
-                     scale_weights=True, focal_loss=True, epochs=1000, baseline_model='log_reg')
+                     scale_weights=True, focal_loss=True, epochs=3000, baseline_model=model)
 
