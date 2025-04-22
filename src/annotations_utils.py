@@ -81,8 +81,8 @@ if __name__ == "__main__":
     segments_dir = "../dataset/3s_segments"
     # annotations_from_spectrograms(spectrogram_dir, output_csv)
     # check_embeddings(embeddings_dir)
-    # embeddings, file_names = load_embeddings(embeddings_dir)
+    embeddings, file_names = load_embeddings(embeddings_dir)
     # #they look quite okay 
-    # tsne_embeddings(embeddings, file_names)
+    tsne_embeddings(embeddings, file_names)
 
     
