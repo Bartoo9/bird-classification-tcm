@@ -7,8 +7,8 @@ from sklearn.preprocessing import LabelEncoder
 import numpy as np
 import pandas as pd
 import os
-from focal_loss import FocalLoss
-from eval_model import evaluate_model
+from utils.focal_loss import FocalLoss
+from utils.eval_model import evaluate_model
 
 def birdnet_baseline(embeddings_dir, annotations_path, output_dir=None, 
                      subset=False, scale_weights=False,
