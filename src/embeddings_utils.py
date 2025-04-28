@@ -100,7 +100,7 @@ def analyze_embeddings_distribution(embedding_annotations_path, output_dir):
 
 if __name__ == "__main__":
     embeddings_dir = "../dataset/embeddings"
-    annotation_file = "../dataset/_embedding_annotations.csv"
+    annotation_file = "../dataset/_augmented_embedding_annotations.csv"
 
     # check_embeddings_data(embeddings_dir, annotation_file)
-    analyze_embeddings_distribution(annotation_file, "../visualizations/embeddings_analysis")
+    analyze_embeddings_distribution(annotation_file, "../visualizations/augmented_embeddings_analysis")

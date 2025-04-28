@@ -258,5 +258,5 @@ if __name__ == "__main__":
     for model in models:
         birdnet_baseline(embeddings_dir, annotations_path, subset=True,
                      output_dir="../results/birdnet_baseline_results",
-                     scale_weights=True, focal_loss=True, epochs=3000, baseline_model=model)
+                     scale_weights=True, focal_loss=True, epochs=1000, baseline_model=model)
 

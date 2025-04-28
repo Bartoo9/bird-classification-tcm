@@ -83,7 +83,7 @@ def tsne_embeddings_selected_species(embeddings_dir, annotations_path, perplexit
     plt.show()
 
 if __name__ == "__main__":
-    embeddings_dir = "../dataset/embeddings"
-    embedding_annotations = "../dataset/_embedding_annotations.csv"
+    embeddings_dir = "../dataset/augmented_embeddings"
+    embedding_annotations = "../dataset/_augmented_embedding_annotations.csv"
     
     tsne_embeddings_selected_species(embeddings_dir, embedding_annotations)
