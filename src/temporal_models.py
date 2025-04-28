@@ -99,48 +99,37 @@ class TemporalDataset(Dataset):
 #     return padded, labels_tensor, lengths
 
 def collect(batch):
-    # First, filter out any empty or invalid windows
     valid_batch = []
     for window, label in batch:
         if isinstance(window, np.ndarray) and window.size > 0:
             valid_batch.append((window, label))
     
-    # If no valid windows remain, create a minimal valid batch
     if not valid_batch:
         print("Warning: All windows in batch were invalid")
-        # Create a dummy window with minimal valid dimensions
         dummy_window = np.zeros((1, batch[0][0].shape[1] if batch and hasattr(batch[0][0], 'shape') else 10))
         valid_batch = [(dummy_window, batch[0][1] if batch else 0)]
     
-    # Sort by length
     valid_batch.sort(key=lambda x: len(x[0]), reverse=True)
     windows, labels = zip(*valid_batch)
     
-    # Get lengths and verify they're all positive
-    lengths = [max(1, len(w)) for w in windows]  # Force minimum length 1
+    lengths = [max(1, len(w)) for w in windows]  
     lengths_tensor = torch.LongTensor(lengths)
     
-    # Create tensor windows with proper shape checking
     tensor_windows = []
     for window in windows:
         if len(window.shape) != 2:
             if len(window.shape) > 2:
-                # Reshape to 2D (sequence length, features)
                 window = window.reshape(window.shape[0], -1)
             elif len(window.shape) == 1:
-                # Expand to 2D (1 sequence element, features)
                 window = window.reshape(1, -1)
         tensor_windows.append(torch.FloatTensor(window))
     
-    # Pad sequences
     padded = nn.utils.rnn.pad_sequence(tensor_windows, batch_first=True)
     
-    # Double-check that lengths don't exceed padded size
     max_len = padded.size(1)
     if torch.any(lengths_tensor > max_len):
         lengths_tensor = torch.clamp(lengths_tensor, max=max_len)
     
-    # Final sanity check - no zero lengths
     lengths_tensor = torch.clamp(lengths_tensor, min=1)
     
     labels_tensor = torch.LongTensor(labels)
@@ -227,7 +216,7 @@ def sliding_window(embeddings_dir, annotations_path, window_size=5):
 
 
 def train_model(model_type, embeddings_dir, annotations_path, output_dir=None, 
-                       window_size=5, hidden_dim=512, num_layers=2, batch_size=32, 
+                       window_size=5, hidden_dim=256, num_layers=2, batch_size=32, 
                        epochs=100, lr=0.001, weight_decay=0.01, subset=False):
     assert model_type in ['gru', 'lstm'], "model_type must be either 'gru' or 'lstm'"
 
@@ -361,7 +350,7 @@ def train_model(model_type, embeddings_dir, annotations_path, output_dir=None,
 
                 val_loss += loss.item()
                 _, predicted = outputs.max(1)
-                total += y.size(0)
+                total += y.size(0)f
                 correct += predicted.eq(y).sum().item()
             
         val_acc = correct / total
@@ -402,19 +391,18 @@ def train_model(model_type, embeddings_dir, annotations_path, output_dir=None,
 
 
 if __name__ == "__main__":
-    # Example usage
     embeddings_dir = "../dataset/embeddings"
     annotations_path = "../dataset/_embedding_annotations.csv"
     output_dir = "../results/gru"
     
-    # Run GRU model
+    #gru
     gru_model, gru_acc, _ = train_model(
         model_type='gru',
         embeddings_dir=embeddings_dir,
         annotations_path=annotations_path,
         output_dir=output_dir,
         window_size=5,
-        hidden_dim=512,
+        hidden_dim=256,
         num_layers=2,        subset=True
     )
     
