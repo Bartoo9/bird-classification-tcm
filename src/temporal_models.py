@@ -581,13 +581,13 @@ def train_model(model_type, embeddings_dir, annotations_path, output_dir=None,
             f.write(f"Layers: {num_layers}\n")
             f.write(f"Parameters: {num_params}\n")
             f.write(f"Accuracy: {test_acc:.4f}\n")
-            f.write(f"mAP: {detailed_metrics['mAP']:.4f}\n")
-            f.write(f"macro F1: {detailed_metrics['macro_f1']:.4f}\n")
+            f.write(f"mAP: {summary_metrics['mAP']:.4f}\n")
+            f.write(f"macro F1: {summary_metrics['macro_f1']:.4f}\n")
 
     if return_detailed_metrics:
-        return model, test_acc, metrics_df, val_loader
+        return model, test_acc, detailed_metrics, val_loader
     else:
-        return model, test_acc, None, val_loader
+        return model, test_acc, summary_metrics, val_loader
 
 if __name__ == "__main__":
     embeddings_dir = "../dataset/augmented_embeddings"

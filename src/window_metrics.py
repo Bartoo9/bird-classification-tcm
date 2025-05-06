@@ -49,8 +49,8 @@ def analyze_window_sizes():
         pd.DataFrame([{
             'window_size': window_size,
             'accuracy': acc,
-            'mAP': metrics['ap'].mean() if isinstance(metrics, pd.DataFrame) else metrics['mAP'],            
-            'macro_f1': metrics['f1'].mean() if isinstance(metrics, pd.DataFrame) else metrics['macro_f1'],  
+            'mAP': metrics['mAP'].mean() if isinstance(metrics, pd.DataFrame) else metrics['mAP'],            
+            'macro_f1': metrics['macro_f1'].mean() if isinstance(metrics, pd.DataFrame) else metrics['macro_f1'],  
             'num_parameters': sum(p.numel() for p in model.parameters() if p.requires_grad)
         }]).to_csv(os.path.join(output_dir, 'metrics.csv'), index=False)
         

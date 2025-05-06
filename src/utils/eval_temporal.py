@@ -156,7 +156,7 @@ def figures(metrics_df, output_dir, model_name):
         'auroc': '#e74c3c'  
     }
     
-    metrics = [('f1', 'F1'), ('ap', 'AP'), ('auroc', 'AUROC')]
+    metrics = [('macro_f1', 'F1'), ('mAP', 'AP'), ('auroc', 'AUROC')]
     bars = []
     
     for i, (metric_col, metric_name) in enumerate(metrics):
@@ -178,8 +178,8 @@ def figures(metrics_df, output_dir, model_name):
     plt.close()
 
     summary_stats = metrics_df.groupby('category').agg({
-        'f1': ['mean', 'std', 'min', 'max'],
-        'ap': ['mean', 'std'],
+        'macro_f1': ['mean', 'std', 'min', 'max'],
+        'mAP': ['mean', 'std'],
         'auroc': ['mean', 'std'],
         'support': ['sum', 'mean']
     }).round(3)
