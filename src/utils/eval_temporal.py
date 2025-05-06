@@ -63,8 +63,8 @@ def evaluate_temporal_model(y_proba, y_true, class_names, output_dir=None, model
 
         class_metrics.append({
             'class': class_name,
-            'f1': f1,
-            'ap': ap,
+            'macro_f1': f1,
+            'mAP': ap,
             'auroc': auroc,
             'support': support,
             'category': category,
@@ -108,7 +108,7 @@ def figures(metrics_df, output_dir, model_name):
     plt.figure(figsize=(10, 6))
     for category in ['short', 'medium', 'long']:
         cat_data = metrics_df[metrics_df['category'] == category]
-        plt.scatter(cat_data['train_support'], cat_data['ap'],
+        plt.scatter(cat_data['train_support'], cat_data['mAP'],
                    label=f'{category.title()} Vocalizations',
                    color=colors[category],
                    alpha=0.7, s=100)
@@ -126,7 +126,7 @@ def figures(metrics_df, output_dir, model_name):
     plt.figure(figsize=(10, 6))
     for category in ['short', 'medium', 'long']:
         cat_data = metrics_df[metrics_df['category'] == category]
-        plt.scatter(cat_data['train_support'], cat_data['f1'],
+        plt.scatter(cat_data['train_support'], cat_data['macro_f1'],
                    label=f'{category.title()} Vocalizations',
                    color=colors[category],
                    alpha=0.7, s=100)
@@ -144,15 +144,15 @@ def figures(metrics_df, output_dir, model_name):
     plt.figure(figsize=(10, 6))
     
     ordered_categories = ['short', 'medium', 'long']
-    category_means = metrics_df.groupby('category')[['f1', 'ap', 'auroc']].mean()
+    category_means = metrics_df.groupby('category')[['macro_f1', 'mAP', 'auroc']].mean()
     category_means = category_means.reindex(ordered_categories)
     
     x = np.arange(len(ordered_categories))
     width = 0.20
     
     metric_colors = {
-        'f1': '#2ecc71',    
-        'ap': '#3498db',    
+        'macro_f1': '#2ecc71',    
+        'mAP': '#3498db',    
         'auroc': '#e74c3c'  
     }
     

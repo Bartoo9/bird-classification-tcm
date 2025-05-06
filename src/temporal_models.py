@@ -228,7 +228,7 @@ def sliding_window(embeddings_dir, annotations_source, window_size=5):
 
 def train_model(model_type, embeddings_dir, annotations_path, output_dir=None, 
                        window_size=5, hidden_dim=256, num_layers=2, batch_size=32, 
-                       epochs=50, lr=0.001, weight_decay=0.01, subset=False, return_detailed_metrics=False,
+                       epochs=50, lr=0.003, weight_decay=0.005, subset=False, return_detailed_metrics=False,
                        use_smote = True, save_resampled=True, resampled_cache_dir="../cache"
     ):
 
