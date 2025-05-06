@@ -8,7 +8,8 @@ import numpy as np
 import pandas as pd
 import os
 from utils.focal_loss import FocalLoss
-from utils.eval_model import evaluate_model
+from utils.eval_baseline import evaluate_baseline_model
+from imblearn.over_sampling import SMOTE
 
 def birdnet_baseline(embeddings_dir, annotations_path, output_dir=None, 
                      subset=False, scale_weights=False,
@@ -48,32 +49,47 @@ def birdnet_baseline(embeddings_dir, annotations_path, output_dir=None,
 
     X = []
     y = []
+    is_augmented = []
 
     for _, row in annotations.iterrows():
         embedding_path = os.path.join(embeddings_dir, row['embedding name'])
         if os.path.exists(embedding_path):
             X.append(np.load(embedding_path))
             y.append(row['label'])
+            is_augmented.append(row['embedding name'].startswith('aug_'))
     
     X = np.array(X)
+    is_augmented = np.array(is_augmented)
 
     label_encoder = LabelEncoder()
     y_encoded = label_encoder.fit_transform(y)
 
-    from imblearn.over_sampling import SMOTE
+    orig_mask = ~is_augmented
+    X_orig = X[orig_mask]
+    y_orig = y_encoded[orig_mask]
 
-    #split the data (keep test set pure)
-    X_temp, X_test, y_temp, y_test = train_test_split(
-        X, y_encoded, test_size=0.1, random_state=2, stratify=y_encoded)
+    X_temp_orig, X_test, y_temp_orig, y_test = train_test_split(
+        X_orig, y_orig, test_size=0.1, random_state=2, stratify=y_orig)
     
+    X_aug = X[is_augmented]
+    y_aug = y_encoded[is_augmented]
+
+    X_temp = np.vstack([X_temp_orig, X_aug])
+    y_temp = np.concatenate([y_temp_orig, y_aug])
+
     smote = SMOTE(random_state=2, k_neighbors=5)
-    X_temp_resampled , y_temp_resampled = smote.fit_resample(X_temp, y_temp)
+    X_temp_resampled, y_temp_resampled = smote.fit_resample(X_temp, y_temp)
+
 
     print("Original class distribution:", np.bincount(y_temp))
     print("Balanced class distribution:", np.bincount(y_temp_resampled))
 
     X_train, X_val, y_train, y_val = train_test_split(
         X_temp_resampled, y_temp_resampled, test_size=0.1, random_state=2, stratify=y_temp_resampled)
+    
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_temp_resampled, y_temp_resampled, 
+        test_size=0.1, random_state=2, stratify=y_temp_resampled)
     
     print(f"Data split: {len(X_train)} train, {len(X_val)} validation, {len(X_test)} test")
 
@@ -235,7 +251,7 @@ def birdnet_baseline(embeddings_dir, annotations_path, output_dir=None,
     #######################evaluate on the test set
     print("Evaluating on test set...")
 
-    evaluate_model(
+    evaluate_baseline_model(
         model=birdnet.network,
         X_test=X_test,
         y_test=y_test,
@@ -251,12 +267,12 @@ def birdnet_baseline(embeddings_dir, annotations_path, output_dir=None,
     )
 
 if __name__ == "__main__":
-    embeddings_dir = "../dataset/embeddings"
-    annotations_path = "../dataset/_embedding_annotations.csv"
+    embeddings_dir = "../dataset/augmented_embeddings"
+    annotations_path = "../dataset/_augmented_embedding_annotations.csv"
     models = ['log_reg', 'one_layer', 'birdnet']
 
     for model in models:
         birdnet_baseline(embeddings_dir, annotations_path, subset=True,
-                     output_dir="../results/birdnet_baseline_results",
+                     output_dir="../results/4_aug_birdnet_baseline_results",
                      scale_weights=True, focal_loss=True, epochs=1000, baseline_model=model)
 

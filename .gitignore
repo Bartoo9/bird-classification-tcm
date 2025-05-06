@@ -6,3 +6,5 @@ src/birdnet_last_layer.pkl
 src/__pycache__
 src/focal_loss.py
 results
+cached_data
+wandb

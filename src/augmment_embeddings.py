@@ -273,7 +273,7 @@ def create_augmented_audio(input_file, output_file, intensity="medium"):
     
     augmented = audio.copy()
     
-    #shift pitches
+    #shift pitches - careful
     if random.random() > 0.3:
         pitch_shift = random.uniform(*pitch_range)
         augmented = librosa.effects.pitch_shift(augmented, sr=sr, n_steps=pitch_shift)
