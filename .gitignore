@@ -9,3 +9,4 @@ results
 cached_data
 wandb
 src/utils/__pycache__
+processed_dataset

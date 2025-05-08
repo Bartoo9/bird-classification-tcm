@@ -101,7 +101,7 @@ def embedding_annotation_file(embeddings_dir, annotation_file, output_csv, missi
             shutil.copy(src_path, dst_path)
 
 if __name__ == '__main__':
-    audio_dir = "../dataset/3s_segments"
+    audio_dir = "../processed_dataset/3s_segments_ctx"
     output_dir = "../dataset/embeddings"
     embeddings_dir = output_dir
     annotation_file = "../dataset/_segment_annotations.csv"

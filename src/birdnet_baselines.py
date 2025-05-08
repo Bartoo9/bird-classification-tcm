@@ -1,5 +1,5 @@
 ##### implement a linear baseline nn to check how it performs on the embeddings
-## additionallyhow birdnet performs on the embeddings
+## additionally how birdnet performs on the created embeddings
 
 import bioacoustics_model_zoo as bmz
 from sklearn.model_selection import train_test_split
