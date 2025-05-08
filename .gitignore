@@ -8,3 +8,4 @@ src/focal_loss.py
 results
 cached_data
 wandb
+src/utils/__pycache__

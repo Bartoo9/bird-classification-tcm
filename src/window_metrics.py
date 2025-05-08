@@ -4,8 +4,8 @@ import os
 import wandb
 
 def analyze_window_sizes():
-    window_sizes = [1, 3, 5, 7, 9]
-    output_base = "../results/window_analysis"
+    window_sizes = [3, 5, 7]
+    output_base = "../results/window_analysis_unidirectional"
     cache_dir = "../cached_data"
     os.makedirs(output_base, exist_ok=True)
     os.makedirs(cache_dir, exist_ok=True)

@@ -14,6 +14,7 @@ from tqdm import tqdm
 import joblib 
 import pickle 
 import wandb 
+from utils.window_sizes import analyze_window_sizes
 
 class GRUClassifier(nn.Module):
     def __init__(self, input_dim, num_classes, hidden_dim = 512, num_layers=2, dropout=0.3):
@@ -26,9 +27,9 @@ class GRUClassifier(nn.Module):
                           num_layers=num_layers, 
                           batch_first=True, 
                           dropout=dropout if num_layers > 1 else 0,
-                          bidirectional=True)
+                          bidirectional=False)
         
-        self.classifier = nn.Linear(hidden_dim * 2, num_classes)  
+        self.classifier = nn.Linear(hidden_dim, num_classes)  
 
     def forward(self, x, lengths = None):
 
@@ -64,8 +65,8 @@ class GRUClassifier(nn.Module):
         else:
             gru_out, hidden = self.gru(x)
 
-        last_hidden = hidden.view(self.num_layers, 2, batch_size, self.hidden_dim)[-1]
-        last_hidden = last_hidden.permute(1, 0, 2).reshape(batch_size, -1)
+        last_hidden = hidden.view(self.num_layers, 1, batch_size, self.hidden_dim)[-1]
+        last_hidden = last_hidden.squeeze(0)
         logits = self.classifier(last_hidden)
 
         return logits
@@ -83,16 +84,21 @@ class TemporalDataset(Dataset):
     
 def collect(batch):
     valid_batch = []
+    window_sizes = []
+    labels = []
+
     for window, label in batch:
         if isinstance(window, np.ndarray) and window.size > 0:
             valid_batch.append((window, label))
+            window_sizes.append(len(window))
+            labels.append(label)
     
     if not valid_batch:
         print("Warning: All windows in batch were invalid")
         embedding_dim = 1024
         dummy_window = np.zeros((1, embedding_dim), dtype=np.float32)
         valid_batch = [(dummy_window, batch[0][1] if batch else 0)]
-    
+
     valid_batch.sort(key=lambda x: len(x[0]), reverse=True)
     windows, labels = zip(*valid_batch)
     
@@ -117,6 +123,7 @@ def collect(batch):
     lengths_tensor = torch.clamp(lengths_tensor, min=1)
     
     labels_tensor = torch.LongTensor(labels)
+
     return padded, lengths_tensor, labels_tensor
 
 def sliding_window(embeddings_dir, annotations_source, window_size=5):
@@ -228,7 +235,7 @@ def sliding_window(embeddings_dir, annotations_source, window_size=5):
 
 def train_model(model_type, embeddings_dir, annotations_path, output_dir=None, 
                        window_size=5, hidden_dim=256, num_layers=2, batch_size=32, 
-                       epochs=50, lr=0.003, weight_decay=0.005, subset=False, return_detailed_metrics=False,
+                       epochs=50, lr=0.005, weight_decay=0.01, subset=False, return_detailed_metrics=False,
                        use_smote = True, save_resampled=True, resampled_cache_dir="../cache"
     ):
 
@@ -295,6 +302,14 @@ def train_model(model_type, embeddings_dir, annotations_path, output_dir=None,
         print(f"using all species: {len(annotations)}")
     
     X_windows, y_encoded, metadata, class_names = sliding_window(embeddings_dir, annotations, window_size=window_size)
+
+    print("\nAnalyzing window sizes for the training set:")
+    window_stats = analyze_window_sizes(X_windows, y_encoded, class_names, output_dir)
+    wandb.log({"window_size_stats": wandb.Table(
+    columns=["Species", "Count", "Mean Size", "Min Size", "Max Size"],
+    data=[[row['Species'], row['Count'], row['Mean Size'], row['Min Size'], row['Max Size']] 
+         for _, row in window_stats.iterrows()]
+)})
 
     unique_recordings = list(set([m['recording_id'] for m in metadata]))
     train_val_recs, test_recs = train_test_split(unique_recordings, test_size=0.1, random_state=1)
