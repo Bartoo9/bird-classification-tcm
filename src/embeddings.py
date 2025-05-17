@@ -3,112 +3,138 @@ import numpy as np
 import os
 import pandas as pd 
 import shutil
+import ast
 
-#citation https://opensoundscape.org/en/latest/tutorials/training_birdnet_and_perch.html
-def get_embeddings(audio_dir, output_dir):
+#GENERATE THE EMBEDDINGS FROM THE SEGMENTS DIR
+def get_embeddings(audio_dir, output_dir, batch_size=1000, force_regenerate=False):
+
     birdnet = bmz.BirdNET()
-
-    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(embeddings_dir, exist_ok=True)
 
     audio_files_all = [file for file in os.listdir(audio_dir) if file.endswith('.wav')]
+    print(f"Found {len(audio_files_all)} total audio files")
 
-    existing_embeddings = [os.path.splitext(file)[0] 
-             + '.wav' for file in os.listdir(output_dir) if file.endswith('.npy')]
-    
-    missing_files = [file for file in audio_files_all if os.path.basename(file) 
-                     not in existing_embeddings]
+    if not force_regenerate:
+        existing_embeddings = set(
+            os.path.splitext(file)[0] for file in os.listdir(output_dir) if file.endswith('.npy')
+        )
+        
+        missing_files = [
+            file for file in audio_files_all 
+            if os.path.splitext(os.path.basename(file))[0] not in existing_embeddings
+        ]
+        
+        print(f"Found {len(existing_embeddings)} existing embeddings")
+        print(f"Need to process {len(missing_files)} new audio files")
+    else:
+        missing_files = audio_files_all
+        print(f"Force regenerating all {len(missing_files)} audio files")
     
     if not missing_files:
-        print("All audio files already processed.")
+        print("No new files to process. All embeddings are already available.")
         return
     
-    print(f"Processing {len(missing_files)} audio files...")
+    total_processed = 0
+    for i in range(0, len(missing_files), batch_size):
+        batch_files = missing_files[i:min(i+batch_size, len(missing_files))]
+        print(f"Processing batch {i//batch_size + 1}/{(len(missing_files)+batch_size-1)//batch_size}: {len(batch_files)} files")
+        
+        missing_paths = [os.path.join(audio_dir, file) for file in batch_files]
+        try:
+            embeddings = birdnet.embed(missing_paths, return_dfs=False, return_preds=False)
+            
+            if len(embeddings) != len(batch_files):
+                print(f"Warning: Got {len(embeddings)} embeddings for {len(batch_files)} files")
+                batch_files = batch_files[:len(embeddings)]
+                
+            for j, audio_file in enumerate(batch_files):
+                file_name = os.path.splitext(audio_file)[0]
+                output_path = os.path.join(output_dir, f"{file_name}.npy")
+                np.save(output_path, embeddings[j])
+                total_processed += 1
+                
+            print(f"Completed batch. Total processed: {total_processed}/{len(missing_files)}")
+            
+        except Exception as e:
+            print(f"Error processing batch: {e}")
+            print("Will continue with next batch")
+    
+    print(f"Embedding generation complete. Generated {total_processed} new embeddings.")
 
-    missing_paths = [os.path.join(audio_dir, file) for file in missing_files]
-    embeddings = birdnet.embed(missing_paths,return_dfs = False, return_preds = False)
-
-    for i, audio_file in enumerate(missing_files):
-        file_name = os.path.splitext(audio_file)[0]
-        output_path = os.path.join(output_dir, f"{file_name}.npy")
-        np.save(output_path, embeddings[i])
-
-def embedding_annotation_file(embeddings_dir, annotation_file, output_csv, missing_csv=None, sorted_dir=None):
+def embedding_annotation_file_multi(embeddings_dir, annotation_file, output_csv, missing_csv=None, sorted_dir=None):
     embedding_files = [file for file in os.listdir(embeddings_dir) if file.endswith('.npy')]
     print(f"Total embeddings found: {len(embedding_files)}")
     
     annotations_df = pd.read_csv(annotation_file)
     print(f"Total annotation entries: {len(annotations_df)}")
     
-    annotations_df['embedding_file'] = annotations_df['segment name'].str.replace('.wav', '.npy')
+    if isinstance(annotations_df['species'].iloc[0], str):
+        annotations_df['species'] = annotations_df['species'].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x)
     
-    #had quite a lot of duplicates for some reason
-    dupes = annotations_df['embedding_file'].duplicated(keep=False)
+    annotations_df['embedding_name'] = annotations_df['segment_name'].str.replace('.wav', '.npy')
+    
+    dupes = annotations_df['embedding_name'].duplicated(keep=False)
     duplicate_count = dupes.sum()
     print(f"Found {duplicate_count} duplicate annotation entries")
     
-    unique_annotation_files = annotations_df['embedding_file'].unique()
+    unique_annotation_files = annotations_df['embedding_name'].unique()
     print(f"Unique annotation files: {len(unique_annotation_files)}")
     
-    valid_embeddings = annotations_df[annotations_df['embedding_file'].isin(embedding_files)]
+    valid_embeddings = annotations_df[annotations_df['embedding_name'].isin(embedding_files)].copy()
     print(f"Valid embeddings with annotations: {len(valid_embeddings)}")
     print(f"Missing embeddings: {len(annotations_df) - len(valid_embeddings)}")
     
-    embedding_data = []
-    processed_embeddings = set()
+    valid_embeddings['multiple_species'] = valid_embeddings['species'].apply(lambda x: len(x) > 1)
     
-    for _, row in valid_embeddings.iterrows():
-        if row["embedding_file"] not in processed_embeddings:
-            embedding_data.append({
-                "embedding name": row["embedding_file"],
-                "label": row["label"]
-            })
-            processed_embeddings.add(row["embedding_file"])
-    
-    unlabeled_embeddings = set(embedding_files) - set(valid_embeddings['embedding_file'])
-    if unlabeled_embeddings:
-        print(f"Found {len(unlabeled_embeddings)} embeddings without annotation entries")
-        for file_name in unlabeled_embeddings:
-            base_name = os.path.splitext(file_name)[0]
-            label = base_name.split('_')[0] if '_' in base_name else 'unknown'
-            embedding_data.append({
-                "embedding name": file_name,
-                "label": label
-            })
-    
-    embedding_df = pd.DataFrame(embedding_data)
-    embedding_df.to_csv(output_csv, index=False)
-    print(f"Created annotation file with {len(embedding_df)} entries (should match total embeddings)")
+    valid_embeddings.to_csv(output_csv, index=False)
+    print(f"Created multi-species annotation file with {len(valid_embeddings)} entries")
+    print(f"Covering {len(valid_embeddings['embedding_name'].unique())} unique embeddings")
     
     if missing_csv:
-        missing_annotations = set(annotations_df['embedding_file']) - set(embedding_files)
+        missing_annotations = set(annotations_df['embedding_name']) - set(embedding_files)
         pd.DataFrame({"missing_file": list(missing_annotations)}).to_csv(missing_csv, index=False)
         print(f"Saved {len(missing_annotations)} missing files to {missing_csv}")
     
-    if sorted_dir and not os.path.exists(sorted_dir):
+    if sorted_dir:
         os.makedirs(sorted_dir, exist_ok=True)
         
-        label_counts = embedding_df['label'].value_counts()
-        print(f"Found {len(label_counts)} unique labels")
+        all_species = set()
+        for species_list in valid_embeddings['species']:
+            all_species.update(species_list)
         
-        #if i need to sort them later
-        for _, row in embedding_df.iterrows():
-            embedding_name = row["embedding name"]
-            label = row["label"]
-            label_dir = os.path.join(sorted_dir, label)
-            os.makedirs(label_dir, exist_ok=True)
-            src_path = os.path.join(embeddings_dir, embedding_name)
-            dst_path = os.path.join(label_dir, embedding_name)
-            shutil.copy(src_path, dst_path)
+        print(f"Found {len(all_species)} unique species")
+        
+        for species in all_species:
+            if species == "Unknown":
+                continue
+                
+            species_dir = os.path.join(sorted_dir, species.replace("/", "_"))
+            os.makedirs(species_dir, exist_ok=True)
+            
+            species_embeddings = valid_embeddings[valid_embeddings['species'].apply(lambda x: species in x)]['embedding_name'].unique()
+            
+            for embedding_name in species_embeddings:
+                src_path = os.path.join(embeddings_dir, embedding_name)
+                dst_path = os.path.join(species_dir, embedding_name)
+                if os.path.exists(src_path):
+                    shutil.copy(src_path, dst_path)
+    
+        print(f"Organized embeddings by {len(all_species)} species")
+    
+    return valid_embeddings
 
 if __name__ == '__main__':
-    audio_dir = "../processed_dataset/3s_segments_ctx"
-    output_dir = "../dataset/embeddings"
-    embeddings_dir = output_dir
-    annotation_file = "../dataset/_segment_annotations.csv"
-    output_csv = "../dataset/_embedding_annotations.csv"
-    missing_csv = "../dataset/_missing_embeddings.csv"
-    sorted_dir = "../dataset/sorted_embeddings"
+    audio_dir = "../processed_dataset/3s_segments_multi"
+    output_dir = "../dataset/dataset_ctx_multi"
+    embeddings_dir = f'{output_dir}/embeddings_multi'
+    annotation_file = "../processed_dataset/segment_metadata_multi.csv"
+    output_csv = "../dataset/dataset_ctx_multi/embedding_annotations_multi.csv"
 
-    # get_embeddings(audio_dir, output_dir)
-    embedding_annotation_file(embeddings_dir, annotation_file,
-                               output_csv)
+    sorted_dir = "../dataset/dataset_ctx_multi/sorted_embeddings_multi"
+    
+    # Generate embeddings if needed (uncomment to run)
+    # get_embeddings(audio_dir, embeddings_dir, batch_size=1000, force_regenerate=False)
+    
+    # Create annotation file
+    embedding_annotation_file_multi(embeddings_dir, annotation_file, 
+                                   output_csv, sorted_dir)

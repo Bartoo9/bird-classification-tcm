@@ -2,33 +2,25 @@ import os
 import pandas as pd
 from collections import Counter
 
+#analyze embeddings data
 def check_embeddings_data(embeddings_dir, annotation_file):
     annotations = pd.read_csv(annotation_file)
-
-    # per class distribution
-    print("\nClass Distribution:")
     class_counts = Counter(annotations["label"])
     for label, count in class_counts.items():
         print(f"{label}: {count} samples")
 
-    #check if some are below 50 samples
     underrepresented_classes = [label for label, count in class_counts.items() if count < 50]
-    print("\nUnderrepresented Classes (fewer than 10 samples):")
     print(underrepresented_classes)
 
-    #null cases
-    print("\nChecking for missing or null values...")
     missing_embeddings = annotations["embedding name"].isnull().sum()
     missing_labels = annotations["label"].isnull().sum()
     print(f"Missing embedding names: {missing_embeddings}")
     print(f"Missing labels: {missing_labels}")
 
-    # duplicates
     print("\nChecking for duplicate entries...")
     duplicate_rows = annotations.duplicated().sum()
     print(f"Number of duplicate rows: {duplicate_rows}")
 
-    #missing embeddings
     print("\nChecking for missing embeddings in the directory...")
     missing_files = []
     for embedding_name in annotations["embedding name"]:
@@ -41,8 +33,6 @@ def check_embeddings_data(embeddings_dir, annotation_file):
         print("Missing embeddings:")
         print(missing_files[:10])
 
-    # Summary
-    print("\nSummary:")
     print(f"Total classes: {len(class_counts)}")
     print(f"Total samples: {len(annotations)}")
     print(f"Underrepresented classes: {len(underrepresented_classes)}")
@@ -102,5 +92,5 @@ if __name__ == "__main__":
     embeddings_dir = "../dataset/embeddings"
     annotation_file = "../dataset/_augmented_embedding_annotations.csv"
 
-    # check_embeddings_data(embeddings_dir, annotation_file)
+    check_embeddings_data(embeddings_dir, annotation_file)
     analyze_embeddings_distribution(annotation_file, "../visualizations/augmented_embeddings_analysis")

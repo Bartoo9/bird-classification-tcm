@@ -3,36 +3,34 @@ import torch.nn as nn
 import numpy as np
 import pandas as pd
 import os
-from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, Dataset    
 from utils.eval_temporal import evaluate_temporal_model
-from utils.eval_temporal import softmax
-from imblearn.over_sampling import SMOTE
-from sklearn.preprocessing import RobustScaler
-from tqdm import tqdm
-import joblib 
-import pickle 
+from sklearn.preprocessing import RobustScaler 
 import wandb 
 from utils.window_sizes import analyze_window_sizes
+import torch.nn.functional as F
+from utils.stratified_sampling import stratified_split_by_recording
 
+#gru class - kept as simple as possible
 class GRUClassifier(nn.Module):
-    def __init__(self, input_dim, num_classes, hidden_dim = 512, num_layers=2, dropout=0.3):
+    def __init__(self, input_dim, num_classes, hidden_dim = 512, num_layers=2, dropout=0.3, bidirectional=True):
         super(GRUClassifier, self).__init__()
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
+        self.bidirectional = bidirectional
 
         self.gru = nn.GRU(input_size=input_dim, 
                           hidden_size=hidden_dim, 
                           num_layers=num_layers, 
                           batch_first=True, 
                           dropout=dropout if num_layers > 1 else 0,
-                          bidirectional=False)
+                          bidirectional=bidirectional)
         
-        self.classifier = nn.Linear(hidden_dim, num_classes)  
-
+        classifier_input_dim = hidden_dim * 2 if bidirectional else hidden_dim
+        self.classifier = nn.Linear(classifier_input_dim, num_classes)
+        
     def forward(self, x, lengths = None):
-
         batch_size = x.size(0)
         hidden = None
         if lengths is not None:
@@ -65,12 +63,18 @@ class GRUClassifier(nn.Module):
         else:
             gru_out, hidden = self.gru(x)
 
-        last_hidden = hidden.view(self.num_layers, 1, batch_size, self.hidden_dim)[-1]
-        last_hidden = last_hidden.squeeze(0)
+        if self.bidirectional:
+            foward_hidden = hidden[0:hidden.size(0):2]
+            backward_hidden = hidden[1:hidden.size(0):2]
+            last_hidden = torch.cat((foward_hidden[-1], backward_hidden[-1]), dim=1)
+        else:
+            last_hidden = hidden[-1]
+
         logits = self.classifier(last_hidden)
 
         return logits
 
+#temporal dataset object
 class TemporalDataset(Dataset):
     def __init__(self, windows, labels):
         self.windows = windows
@@ -81,7 +85,8 @@ class TemporalDataset(Dataset):
     
     def __getitem__(self, idx):
         return self.windows[idx], self.labels[idx]
-    
+
+#collate function to collect all of the windows in a batch
 def collect(batch):
     valid_batch = []
     window_sizes = []
@@ -117,90 +122,194 @@ def collect(batch):
     padded = nn.utils.rnn.pad_sequence(tensor_windows, batch_first=True)
     
     max_len = padded.size(1)
+
     if torch.any(lengths_tensor > max_len):
         lengths_tensor = torch.clamp(lengths_tensor, max=max_len)
     
     lengths_tensor = torch.clamp(lengths_tensor, min=1)
     
-    labels_tensor = torch.LongTensor(labels)
+    labels_tensor = torch.FloatTensor(np.vstack(labels))
 
     return padded, lengths_tensor, labels_tensor
 
-def sliding_window(embeddings_dir, annotations_source, window_size=5):
-
-    if window_size % 2 == 0:
-        window_size += 1
-    
-    radius = window_size//2
+#generates the sliding windows based on the given size and directionality
+def sliding_window(embeddings_dir, annotations_source, window_size=5, ctx_type='bidirectional', subset=True):
 
     if isinstance(annotations_source, str):
+        print(f"Loading annotations from file: {annotations_source}")
+        if not os.path.exists(annotations_source):
+            print(f"ERROR: Annotations file not found: {annotations_source}")
+            return [], [], [], []
         annotations = pd.read_csv(annotations_source)
     else:
-        annotations = annotations_source
+        annotations = annotations_source.copy()
     
-    #parses the file so I can easily choose what will be included in the 'context'
+    print(f"Initial annotations shape: {annotations.shape}")
+    
+    required_columns = ['segment_name', 'species', 'embedding_name']
+    missing_columns = [col for col in required_columns if col not in annotations.columns]
+    if missing_columns:
+        print(f"ERROR: Missing required columns in annotations: {missing_columns}")
+        print(f"Available columns: {annotations.columns.tolist()}")
+        return [], [], [], []
+    
+    if window_size % 2 == 0 and ctx_type == 'bidirectional':
+        window_size += 1
+    
+    if ctx_type == 'bidirectional':
+        past_ctx = window_size // 2
+        future_ctx = window_size // 2
+    else:
+        past_ctx = window_size - 1
+        future_ctx = 0
+
+    if subset:
+        short_species = [
+            "Cyanistes caeruleus_Eurasian Blue Tit",
+            "Regulus regulus_Goldcrest",
+            "Cisticola juncidis_Landeryklopkloppie",
+            "Parus major_Great Tit",
+            "Erithacus rubecula_European Robin",
+            "Emberiza calandra_Corn Bunting",
+            "Troglodytes troglodytes_Eurasian Wren",
+            "Phylloscopus trochilus_Hofsanger",
+            "Curruca melanocephala_Sardinian Warbler"
+        ]
+
+        medium_species = [
+            "Fringilla coelebs_Gryskoppie", 
+            "Turdus merula_Eurasian Blackbird",
+            "Sylvia atricapilla_Swartkroonsanger",
+            "Luscinia megarhynchos_Common Nightingale",
+            "Phylloscopus collybita_Common Chiffchaff",
+            "Turdus philomelos_Song Thrush",
+            "Periparus ater_Coal Tit",
+            "Phylloscopus sibilatrix_Wood Warbler",
+            "Galerida theklae_Thekla's Lark",
+            "Lullula arborea_Wood Lark"
+        ]
+
+        long_species = [
+            "Alauda arvensis_Eurasian Skylark",
+            "Cuculus canorus_Europese Koekoek",
+            "Acrocephalus scirpaceus_Common Reed Warbler",
+            "Acrocephalus arundinaceus_Grootrietsanger",
+            "Columba palumbus_Common Wood-Pigeon"
+        ]
+        
+    if subset:
+        selected_species = short_species + medium_species + long_species + ["Noise_Noise"]
+        print(f"Using subset of {len(selected_species)} species")
+        
+        import ast
+        
+        def parse_species(species_entry):
+            if isinstance(species_entry, str):
+                if species_entry.startswith('[') and species_entry.endswith(']'):
+                    try:
+                        return ast.literal_eval(species_entry)
+                    except:
+                        return [species_entry]
+                return [species_entry]
+            elif isinstance(species_entry, list):
+                return species_entry
+            else:
+                return [str(species_entry)]
+        
+        print(f"Annotations before filtering: {len(annotations)}")
+        annotations['species_list'] = annotations['species'].apply(parse_species)
+
+        annotations = annotations[annotations['species_list'].apply(
+            lambda species_list: all(species in selected_species for species in species_list)
+        )]
+        print(f"Annotations after strict filtering: {len(annotations)}")
+        
+        if len(annotations) == 0:
+            print("WARNING: All annotations were filtered out! Check species names.")
+            print(f"Selected species (first 3): {selected_species[:3]}")
+            sample_species = annotations_source['species'].iloc[:5].tolist() if isinstance(annotations_source, pd.DataFrame) else "N/A"
+            print(f"Sample species in data: {sample_species}")
+            return [], [], [], []
+
+    #parser of the files based on the naming of the embeddings
     def parser(filename):
-        is_augmented = filename.startswith('aug_')
+        if filename.endswith('.npy') or filename.endswith('.wav'):
+            filename = os.path.splitext(filename)[0]
 
-        if is_augmented:
-            clean_name = filename[4:]
-
-        else:
-            clean_name = filename
-
+        clean_name = filename
         parts = clean_name.split('_')
-        recording_id = '_'.join(parts[:3])
-
+        
+        recording_id = '_'.join(parts[:2]) if len(parts) >= 2 else filename
+        
+        part = "unknown"
         segment_num = 0
         subsegment_num = 0
-
-        if len(parts) >= 5:
-            try:
-                segment_num = int(parts[4])
-            except ValueError:
-                segment_num = 0
         
-        if len(parts) >= 6:
-            subsegment_str = parts[5].split('.')[0]
-            try:
-                subsegment_num = int(subsegment_str)
+        if len(parts) > 6:
+            part = parts[6]
 
-            except ValueError:      
+            part_ranks = {
+                'start': 1,
+                'middle': 2,
+                'end': 3,
+                'background': 1
+            }
+            segment_num = part_ranks.get(part, 0)
+
+        if len(parts) > 7:
+            try:
+                subsegment_num = int(parts[7])
+            except ValueError:
                 subsegment_num = 0
 
-        return recording_id, segment_num, subsegment_num, is_augmented
+        return recording_id, segment_num, part, subsegment_num
     
-    parsed_info = [parser(filename) for filename in annotations['embedding name']]
+    parsed_info = [parser(filename) for filename in annotations['segment_name']]
     annotations['recording_id'] = [info[0] for info in parsed_info]
     annotations['segment_num'] = [info[1] for info in parsed_info]
-    annotations['subsegment_num'] = [info[2] for info in parsed_info]
-    #keeps track of whether the embedding is augmented or not
-    annotations['is_augmented'] = [info[3] for info in parsed_info]
-
+    annotations['position'] = [info[2] for info in parsed_info] 
+    annotations['subsegment_num'] = [info[3] for info in parsed_info]
     recording_groups = annotations.groupby('recording_id')
 
     X_windows = []
     y_targets = []
     metadata = []
 
+    all_species_set = set()
+    for species_list in annotations['species_list']:
+        if isinstance(species_list, list):
+            all_species_set.update(species_list)
+        else:
+            all_species_set.add(species_list)
+
+    all_species = sorted(all_species_set)
+    species_to_idx = {species: idx for idx, species in enumerate(all_species)}
+    print(f"Created index for {len(all_species)} unique species")
+
+    num_classes = len(all_species)
+
     for recording_id, group in recording_groups:
-        sorted_group = group.sort_values(by=['segment_num', 'subsegment_num'])
+        sorted_group = group.sort_values(by=['segment_num'])
 
         recording_embeddings = []
+        recording_timestamps = []
         recording_labels = []
         embedding_names = []
+        positions = []
 
         for _, row in sorted_group.iterrows():
-            embedding_path = os.path.join(embeddings_dir, row['embedding name'])
+            embedding_path = os.path.join(embeddings_dir, row['embedding_name'])
             if os.path.exists(embedding_path):
                 embedding = np.load(embedding_path)
                 recording_embeddings.append(embedding)
-                recording_labels.append(row['label'])
-                embedding_names.append(row['embedding name'])
+                recording_timestamps.append(row['segment_num'])
+                recording_labels.append(row['species_list'] if 'species_list' in row else row['species'])
+                embedding_names.append(row['embedding_name'])
+                positions.append(row['position'])
 
         for i in range(len(recording_embeddings)):
-            start_idx = max(0, i - radius)
-            end_idx = min(len(recording_embeddings), i + radius + 1)
+            start_idx = max(0, i - past_ctx)
+            end_idx = min(len(recording_embeddings), i + future_ctx + 1)
 
             if end_idx <= start_idx:
                 print('empty window')
@@ -211,205 +320,208 @@ def sliding_window(embeddings_dir, annotations_source, window_size=5):
             if len(window) == 0:
                 print('zero length window found at', recording_id)
                 continue
+            
+            window_species = set()
+            for species_list in recording_labels[start_idx:end_idx]:
+                if isinstance(species_list, list):
+                    window_species.update(species_list)
+                else:
+                    window_species.add(species_list)
 
-            center_label = recording_labels[i]
+            target = np.zeros(num_classes)
+
+            for species in window_species:
+                if species in species_to_idx:
+                    target[species_to_idx[species]] = 1
 
             X_windows.append(window)
-            y_targets.append(center_label)
+            y_targets.append(target)
             metadata.append({
                 'recording_id': recording_id,
                 'center_label': embedding_names[i],
-                'segment_num': sorted_group.iloc[i]['segment_num'],
-                'subsegment_num': sorted_group.iloc[i]['subsegment_num'],
+                'position': positions[i],
                 'window_start': start_idx,
-                'window_end': end_idx
+                'window_end': end_idx,
+                'window_size': window_size,
+                'ctx type': ctx_type,
+                'num_species': len(window_species)
             })
     
-    label_encoder = LabelEncoder()
-    y_encoded = label_encoder.fit_transform(y_targets)
+    y_targets = np.array(y_targets)
+    y_targets_array = np.array(y_targets)
 
-    print(f'created {len(X_windows)} windows from {len(recording_groups)} recordings')
+    if len(y_targets_array.shape) != 2:
+        print(f"Warning: y_targets has unexpected shape {y_targets_array.shape}")
+        if len(y_targets) > 0:
+            if num_classes > 0:
+                y_targets_array = np.vstack([np.array(t).reshape(1, -1) for t in y_targets])
+            else:
+                y_targets_array = np.zeros((len(y_targets), 1))
+        else:
+            y_targets_array = np.zeros((0, max(1, num_classes)))
+    
+    if len(y_targets_array) > 0:
+        num_single_label = sum(np.sum(y_targets_array, axis=1) == 1)
+        num_multi_label = sum(np.sum(y_targets_array, axis=1) > 1)
+        avg_labels = np.mean(np.sum(y_targets_array, axis=1))
+    else:
+        num_single_label = num_multi_label = 0
+        avg_labels = 0
 
-    return X_windows, y_encoded, metadata, label_encoder.classes_
 
+    print(f'Created {len(X_windows)} windows from {len(recording_groups)} recordings')
+    
+    
+    print(f'Multi-label statistics:')
+    print(f'  - Windows with single species: {num_single_label} ({num_single_label/len(X_windows)*100:.1f}%)')
+    print(f'  - Windows with multiple species: {num_multi_label} ({num_multi_label/len(X_windows)*100:.1f}%)')
+    print(f'  - Average species per window: {avg_labels:.2f}')
 
+    return X_windows, y_targets, metadata, all_species
+
+#train model fucntion including subsetting, train val and test loops
 def train_model(model_type, embeddings_dir, annotations_path, output_dir=None, 
                        window_size=5, hidden_dim=256, num_layers=2, batch_size=32, 
-                       epochs=50, lr=0.005, weight_decay=0.01, subset=False, return_detailed_metrics=False,
-                       use_smote = True, save_resampled=True, resampled_cache_dir="../cache"
+                       epochs=50, lr=0.001, weight_decay=0.01, subset=False, return_detailed_metrics=False,
+                       ctx_type='bidirectional', downsample=False, threshold=1500, dropout=0.3, sigmoid=0.4,
+                       use_wandb=True
     ):
 
-    assert model_type in ['gru', 'lstm'], "model_type must be either 'gru' or 'lstm'"
+    short_species = [
+        "Cyanistes caeruleus_Eurasian Blue Tit",
+        "Regulus regulus_Goldcrest",
+        "Cisticola juncidis_Landeryklopkloppie",
+        "Parus major_Great Tit",
+        "Erithacus rubecula_European Robin",
+        "Emberiza calandra_Corn Bunting",
+        "Troglodytes troglodytes_Eurasian Wren",
+        "Phylloscopus trochilus_Hofsanger",
+        "Curruca melanocephala_Sardinian Warbler"
+    ]
+
+    medium_species = [
+        "Fringilla coelebs_Gryskoppie", 
+        "Turdus merula_Eurasian Blackbird",
+        "Sylvia atricapilla_Swartkroonsanger",
+        "Luscinia megarhynchos_Common Nightingale",
+        "Phylloscopus collybita_Common Chiffchaff",
+        "Turdus philomelos_Song Thrush",
+        "Periparus ater_Coal Tit",
+        "Phylloscopus sibilatrix_Wood Warbler",
+        "Galerida theklae_Thekla's Lark",
+        "Lullula arborea_Wood Lark"
+    ]
+
+    long_species = [
+        "Alauda arvensis_Eurasian Skylark",
+        "Cuculus canorus_Europese Koekoek",
+        "Acrocephalus scirpaceus_Common Reed Warbler",
+        "Acrocephalus arundinaceus_Grootrietsanger",
+        "Columba palumbus_Common Wood-Pigeon"
+    ]
+
+    assert model_type in ['gru']
 
     #wandb
-    run = wandb.init(
-        project="bird-classification-tcm",
-        name=f"{model_type}_w{window_size}_h{hidden_dim}_l{num_layers}",
-        group="temporal_models",
-        tags=[model_type, "augmented" if "augmented" in embeddings_dir else "regular"],
-        config={
-            "model_type": model_type,
-            "window_size": window_size,
-            "hidden_dim": hidden_dim,
-            "num_layers": num_layers,
-            "batch_size": batch_size,
-            "learning_rate": lr,
-            "weight_decay": weight_decay,
-            "subset": subset,
-            "use_smote": use_smote,
-            "epochs": epochs,
-            "embeddings_type": "augmented" if "augmented" in embeddings_dir else "regular"
-        }
-    )
+    if use_wandb:
+        try:
+            if wandb.run is None:
+                wandb.init(project="bird-classification", 
+                          name=f"{model_type}_w{window_size}_h{hidden_dim}_l{num_layers}")
+        except Exception as e:
+            print(f"Warning: Could not initialize wandb: {e}")
 
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
     all_annotations = pd.read_csv(annotations_path)
-
-    if save_resampled and resampled_cache_dir:
-        os.makedirs(resampled_cache_dir, exist_ok=True)
     
-    #cache
-    cache_identifier = f"{os.path.basename(embeddings_dir)}_{'subset' if subset else 'all'}"
-    cache_file_y = os.path.join(resampled_cache_dir, f"y_train_resampled_{cache_identifier}.npy")
-    cache_file_scaler = os.path.join(resampled_cache_dir, f"scaler_{cache_identifier}.joblib")
-    
-    if subset:
-        short_species = [
-            'Emberiza calandra', 'Cyanistes caeruleus', 'Regulus regulus',
-            'Certhia brachydactyla', 'Emberiza cirlus'
-        ]
 
-        medium_species = [
-            'Fringilla coelebs', 'Turdus merula', 'Sylvia atricapilla',
-            'Erithacus rubecula', 'Luscinia megarhynchos', 'Parus major',
-            'Phylloscopus collybita', 'Turdus philomelos'
-        ]
+    X_windows, y_encoded, metadata, class_names = sliding_window(embeddings_dir, all_annotations,
+                                                                  window_size=window_size, ctx_type=ctx_type,
+                                                                  subset=subset)
 
-        long_species = [
-            'Periparus ater', 'Alauda arvensis', 'Cuculus canorus',
-            'Acrocephalus scirpaceus', 'Acrocephalus arundinaceus', 
-            'Columba palumbus', 'Spinus spinus'
-        ]
+    X_array = np.array(X_windows, dtype=object)
+    y_array = np.array(y_encoded)
+
+
+    print("\nSplitting data using multi-label stratified split...")
+    try:
+        #here the stratified sampling is used
+        X_train, X_val, X_test, y_train, y_val, y_test = stratified_split_by_recording(
+            X_array, y_array, test_size=0.1, val_size=0.1, random_state=42)
         
-        selected_species = short_species + medium_species + long_species
-        annotations = all_annotations[all_annotations['label'].isin(selected_species)].copy()
-        print(f"using subset of {len(selected_species)} species")
-    
-    else:
-        annotations = all_annotations
-        print(f"using all species: {len(annotations)}")
-    
-    X_windows, y_encoded, metadata, class_names = sliding_window(embeddings_dir, annotations, window_size=window_size)
+        print(f"Split complete: {len(X_train)} train, {len(X_val)} val, {len(X_test)} test samples")
+    except Exception as e:
+        X_train, X_test, y_train, y_test = train_test_split(X_windows, y_encoded, test_size=0.2, random_state=42)
+        X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.125, random_state=42) 
 
     print("\nAnalyzing window sizes for the training set:")
     window_stats = analyze_window_sizes(X_windows, y_encoded, class_names, output_dir)
-    wandb.log({"window_size_stats": wandb.Table(
-    columns=["Species", "Count", "Mean Size", "Min Size", "Max Size"],
-    data=[[row['Species'], row['Count'], row['Mean Size'], row['Min Size'], row['Max Size']] 
-         for _, row in window_stats.iterrows()]
-)})
+    if use_wandb and wandb.run is not None:
+        wandb.log({"window_size_stats": wandb.Table(
+            columns=["Species", "Count", "Mean Size", "Min Size", "Max Size"],
+            data=[[row['species'], row['count'], row['avg_size'], row['min_size'], row['max_size']] 
+                for _, row in window_stats.iterrows()]
+        )})
 
-    unique_recordings = list(set([m['recording_id'] for m in metadata]))
-    train_val_recs, test_recs = train_test_split(unique_recordings, test_size=0.1, random_state=1)
-    train_recs, val_recs = train_test_split(train_val_recs, test_size=0.1, random_state=1)
+    #class distributions
+    class_distribution = pd.DataFrame({
+        'class': class_names,
+        'train': [np.sum(y_train[:, i]) for i in range(len(class_names))],
+        'val': [np.sum(y_val[:, i]) for i in range(len(class_names))],
+        'test': [np.sum(y_test[:, i]) for i in range(len(class_names))]
+    })
 
-    train_mask = np.array([m['recording_id'] in train_recs for m in metadata])
-    val_mask = np.array([m['recording_id'] in val_recs for m in metadata])
-    test_mask = np.array([m['recording_id'] in test_recs for m in metadata])
+    class_distribution['total'] = class_distribution['train'] + class_distribution['val'] + class_distribution['test']
+    class_distribution['train_pct'] = (class_distribution['train'] / class_distribution['train'].sum()) * 100
+    class_distribution['val_pct'] = (class_distribution['val'] / class_distribution['val'].sum()) * 100
+    class_distribution['test_pct'] = (class_distribution['test'] / class_distribution['test'].sum()) * 100
 
-    X_train = [X_windows[i] for i in range(len(X_windows)) if train_mask[i]]
-    y_train = y_encoded[train_mask]
-    X_val = [X_windows[i] for i in range(len(X_windows)) if val_mask[i]]
-    y_val = y_encoded[val_mask]
-    X_test = [X_windows[i] for i in range(len(X_windows)) if test_mask[i]]
-    y_test = y_encoded[test_mask]
+    print("\nClass distribution after stratified split:")
+    print(class_distribution)
 
-    train_counts = {class_name: sum(y_train == i) for i, class_name in enumerate(class_names)}
+    if use_wandb and wandb.run is not None:
+        wandb.log({
+            "class_distribution": wandb.Table(
+                dataframe=class_distribution
+            )
+        })
 
-    print(f"train: {len(X_train)}, val: {len(X_val)}, test: {len(X_test)}")
+    if downsample:
+        print(f"\nDownsampling majority classes (threshold: {threshold} samples)")
+        class_counts = np.sum(y_train, axis=0)
+        print("Original class distribution:", class_counts)
+        class_indices = [np.where(y_train == i)[0] for i in range(len(class_counts))]
+        X_train_downsampled = []
+        y_train_downsampled = []
 
-    #had to save cache because it took too long to make all of the samples again
-    pickle_file_X = os.path.join(resampled_cache_dir, f"X_train_resampled_{cache_identifier}.pkl")
-    if save_resampled and os.path.exists(pickle_file_X) and os.path.exists(cache_file_y):
-        print(f"Loading cached resampled data from {resampled_cache_dir}...")
-        try:
-
-            X_train = []
-            with open(pickle_file_X, 'rb') as f:
-                X_train = pickle.load(f)
-                print(f"Loaded {len(X_train)} windows from pickle file")
-            
-            y_train = np.load(cache_file_y)
-            scaler = joblib.load(cache_file_scaler)
-            
-            print(f"Loaded {len(X_train)} resampled windows and labels from cache")
-            print("After SMOTE class distribution:", np.bincount(y_train))
-            
-        except Exception as e:
-            print(f"Error loading cached data: {e}")
-            print("Will regenerate the resampled data...")
-            use_cache = False
-        else:
-            use_cache = True
-    else:
-        use_cache = False
-    
-    if not use_cache and use_smote:
-        print("Applying SMOTE oversampling...")
-        print('extracting center embeddings...')
-        center_idx = window_size // 2
-        X_train_centers = np.array([
-            x[min(center_idx, len(x)-1)] if len(x) > 0 else np.zeros((X_train[0][0].shape[0],)) 
-            for x in tqdm(X_train, desc="Extracting center embeddings", total=len(X_train))])
-        
-        #storeoriginal so smote doesnt leak into the set
-        original_sample_count = len(X_train_centers)
-        
-        #apply smote only to the training set
-        smote = SMOTE(random_state=42, k_neighbors=min(5, min(np.bincount(y_train))))
-        X_train_centers_resampled, y_train_resampled = smote.fit_resample(X_train_centers, y_train)
-        
-        print("After SMOTE class distribution:", np.bincount(y_train_resampled))
-        print(f"Creating {len(X_train_centers_resampled)} samples ({len(X_train_centers_resampled) - original_sample_count} synthetic)")
-
-        X_train_resampled = []
-        
-        for i in tqdm(range(len(X_train_centers_resampled)), desc="Creating resampled windows"):
-            if i < original_sample_count:
-                X_train_resampled.append(X_train[i])
+        for class_idx, indices in enumerate(class_indices):
+            count = len(indices)
+            if count > threshold:
+                np.random.seed(4)
+                indices = np.random.choice(indices, size=threshold, replace=False)
+                print(f"Class {class_names[class_idx]}: {count} -> {threshold} samples")
             else:
-                synthetic_point = X_train_centers_resampled[i]
-                distances = np.linalg.norm(X_train_centers - synthetic_point, axis=1)
-                nearest_idx = np.argsort(distances)[0]
-                X_train_resampled.append(X_train[nearest_idx])
-        
-        # Update training data
-        X_train = X_train_resampled
-        y_train = y_train_resampled
+                indices = indices
+            
+            for idx in indices:
+                X_train_downsampled.append(X_train[idx])
+                y_train_downsampled.append(y_train[idx])
+    
+        X_train = X_train_downsampled
+        y_train = np.array(y_train_downsampled)
 
-        #save resampled data to cache
-        if save_resampled and resampled_cache_dir:
-            print(f"Saving resampled data to {resampled_cache_dir}...")
-            pickle_file_X = os.path.join(resampled_cache_dir, f"X_train_resampled_{cache_identifier}.pkl")
-            with open(pickle_file_X, 'wb') as f:
-                pickle.dump(X_train, f)
-
-            np.save(cache_file_y, y_train)
-
-    print(f"train: {len(X_train)}, val: {len(X_val)}, test: {len(X_test)}")
-
-    if not use_cache:
-        print("Scaling data...")
+        new_class_counts = np.sum(y_train, axis=0)
+        print("New class distribution:", new_class_counts)
+    if isinstance(X_train[0], np.ndarray):
         flat_train_data = np.vstack([emb for seq in X_train for emb in seq])
-        scaler = RobustScaler().fit(flat_train_data)
+    else:
+        flat_train_data = np.vstack([emb for seq in X_train for emb in seq])
 
-        if save_resampled and resampled_cache_dir:
-            joblib.dump(scaler, cache_file_scaler)
-            print(f"Scaler saved to {cache_file_scaler}")
+    scaler = RobustScaler().fit(flat_train_data)
 
-    # Apply scaler to each embedding in each sequence
+    #scaling the values
     X_train_scaled = [np.array([scaler.transform(emb.reshape(1, -1)).reshape(-1) for emb in seq]) for seq in X_train]
     X_val_scaled = [np.array([scaler.transform(emb.reshape(1, -1)).reshape(-1) for emb in seq]) for seq in X_val]
     X_test_scaled = [np.array([scaler.transform(emb.reshape(1, -1)).reshape(-1) for emb in seq]) for seq in X_test]
@@ -427,30 +539,65 @@ def train_model(model_type, embeddings_dir, annotations_path, output_dir=None,
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    #model
     model = GRUClassifier(
             input_dim = input_dim,
              num_classes= num_classes, 
              hidden_dim=hidden_dim, 
-             num_layers=num_layers).to(device)
+             num_layers=num_layers,
+             bidirectional=(ctx_type == 'bidirectional')).to(device)
         
     model_name = f'gru_model_w{window_size}_h{hidden_dim}_l{num_layers}'
     
     print(f'training {model_name}')
 
-    #imbalance 
-    class_counts = np.bincount(y_train)
-    class_weights = np.sqrt(class_counts.max() / class_counts)
-    class_weights = class_weights / np.mean(class_weights)
-    class_weights = torch.FloatTensor(class_weights).to(device)
+    class_counts = np.sum(y_train, axis=0)
+    pos_samples = class_counts
+    neg_samples = len(y_train) - class_counts
+    pos_weight = neg_samples / np.maximum(pos_samples, 1) 
 
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    #cap large weights due to the imbalanced nature of the dataset
+    pos_weight = np.minimum(pos_weight, 100.0)
 
+    class_weights_tensor = torch.FloatTensor(pos_weight).to(device)
+    print(f"Class weight range: [{np.min(pos_weight):.2f}, {np.max(pos_weight):.2f}]")
+
+    #focal loss
+    from utils.focal_loss import FocalLoss
+    criterion = FocalLoss(gamma=2.0, alpha=0.25, reduction='mean', pos_weight=class_weights_tensor)
+
+    # class_weights_tensor = torch.FloatTensor(class_weights).to(device) 
+    # criterion = nn.BCEWithLogitsLoss(pos_weight=class_weights_tensor)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, 
+        mode='min',          
+        factor=0.5,          
+        patience=5,          
+        verbose=True,
+        min_lr=1e-6
+    )
+    
     best_val_acc = 0.0
 
     #training loop
     for epoch in range(epochs):
-        model.train()
+        if epoch == 0:
+            #some checks for the first epoch
+            print("\nInitial model statistics:")
+            first_batch = next(iter(train_loader))
+            first_x, first_lengths, first_y = [item.to(device) for item in first_batch]
+            model.eval()
+            with torch.no_grad():
+                outputs = model(first_x, first_lengths)
+                probs = F.sigmoid(outputs)
+            print(f"- Output logits range: [{outputs.min().item():.4f}, {outputs.max().item():.4f}]")
+            print(f"- Output probs range: [{probs.min().item():.4f}, {probs.max().item():.4f}]")
+            print(f"- Unique predicted classes: {len(torch.unique(outputs.argmax(dim=1)))}")
+            model.train()
+
         train_loss = 0.0
         train_correct = 0
         train_total = 0
@@ -473,41 +620,79 @@ def train_model(model_type, embeddings_dir, annotations_path, output_dir=None,
             optimizer.step()
 
             train_loss += loss.item()
-            _, predicted = outputs.max(1)
+            train_preds = (torch.sigmoid(outputs) > sigmoid).int()
+            TP = ((train_preds == 1) & (y == 1)).sum(dim=1).float()
+            TN = ((train_preds == 0) & (y == 0)).sum(dim=1).float()
+            total_correct = TP + TN
+            total_per_sample = y.size(1) 
+            sample_accuracies = total_correct / total_per_sample
+            train_correct += torch.sum(sample_accuracies).item()
             train_total += y.size(0)
-            train_correct += predicted.eq(y).sum().item()
-        
-        train_acc = train_correct / train_total
+
+        train_acc = float(train_correct) / train_total
         train_loss /= len(train_loader)
+
+        if epoch % 10 == 0 or epoch == epochs-1:
+            all_train_preds = []
+            model.eval()
+            with torch.no_grad():
+                for x, lengths, y in train_loader:
+                    x, lengths = x.to(device), lengths.to(device)
+                    outputs = model(x, lengths)
+                    _, predicted = outputs.max(1)
+                    all_train_preds.extend(predicted.cpu().numpy())
+            all_train_preds_array = np.vstack(all_train_preds)
+            classes_with_positive_preds = np.sum(np.sum(all_train_preds_array, axis=0) > 0)
+            print(f"- Training: predicting {classes_with_positive_preds} unique classes out of {num_classes}")
+            model.train()
 
         #validation loop
         model.eval()
         val_loss = 0.0
         correct = 0.0
-        total = 0.0
+        val_total = 0.0
+
+        all_val_preds = []
+        all_val_outputs = []
 
         with torch.no_grad():
             for x, lengths, y in val_loader:
                 x, lengths, y = x.to(device), lengths.to(device), y.to(device)
                 outputs = model(x, lengths)
-                loss = criterion(outputs, y)
+                targets = y.float().to(device)
+                loss = criterion(outputs, targets)
 
                 val_loss += loss.item()
-                _, predicted = outputs.max(1)
-                total += y.size(0)
-                correct += predicted.eq(y).sum().item()
-            
-        val_acc = correct / total
-        val_loss /= len(val_loader)
+                val_preds = (torch.sigmoid(outputs) > sigmoid).int()
+                all_val_outputs.append(outputs.cpu().numpy())
+                preds_per_sample = torch.sum(val_preds, dim=1)
+                all_val_preds.append(val_preds.cpu().numpy())
+                TP = ((val_preds == 1) & (y == 1)).sum(dim=1).float()
+                TN = ((val_preds == 0) & (y == 0)).sum(dim=1).float()
+                total_correct = TP + TN
+                total_per_sample = y.size(1)  
+                sample_accuracies = total_correct / total_per_sample
+                correct += torch.sum(sample_accuracies).item()
+                val_total += y.size(0) 
 
-        wandb.log({
-            "epoch": epoch,
-            "train/loss": train_loss / len(train_loader),
-            "train/accuracy": train_correct / train_total,
-            "val/loss": val_loss,
-            "val/accuracy": val_acc,
-            "learning_rate": optimizer.param_groups[0]['lr']
-        }, step=epoch)
+        val_acc = correct / val_total
+        val_loss /= len(val_loader)
+        scheduler.step(val_loss)
+        
+        if epoch % 10 == 0 or epoch == epochs-1:
+            all_val_preds_array = np.vstack(all_val_preds) 
+            classes_with_positive_preds = np.sum(np.sum(all_val_preds_array, axis=0) > 0)
+            print(f"- Validation: predicting {classes_with_positive_preds} unique classes out of {num_classes}")
+
+        if use_wandb and wandb.run is not None:
+            wandb.log({
+                "epoch": epoch,
+                "train/loss": train_loss / len(train_loader),
+                "train/accuracy": train_correct / train_total,
+                "val/loss": val_loss,
+                "val/accuracy": val_acc,
+                "learning_rate": optimizer.param_groups[0]['lr']
+            }, step=epoch)
 
 
         if epoch % 10 == 0 or epoch == epochs-1:
@@ -520,17 +705,19 @@ def train_model(model_type, embeddings_dir, annotations_path, output_dir=None,
 
             if output_dir:
                 torch.save(model.state_dict(), os.path.join(output_dir, f"best_{model_name}.pt"))
+
     print('Training complete')
 
     if output_dir and os.path.exists(os.path.join(output_dir, f"best_{model_name}.pt")):
         model.load_state_dict(torch.load(os.path.join(output_dir, f"best_{model_name}.pt")))
+
 
     #test loop
     print()
     model.eval()
     test_loss = 0.0
     correct = 0.0
-    total = 0.0
+    test_total = 0.0
     all_preds = []
     all_labels = []
     all_outputs = []
@@ -539,34 +726,57 @@ def train_model(model_type, embeddings_dir, annotations_path, output_dir=None,
         for x, lengths, y in test_loader:
             x, lengths, y = x.to(device), lengths.to(device), y.to(device)
             outputs = model(x, lengths)
-            loss = criterion(outputs, y)
+            targets = y.float().to(device)
+            loss = criterion(outputs, targets)
 
             test_loss += loss.item()
-            _, predicted = outputs.max(1)
-            total += y.size(0)
-            correct += predicted.eq(y).sum().item()
-            
-            all_preds.extend(predicted.cpu().numpy())
-            all_labels.extend(y.cpu().numpy())
-            all_outputs.extend(outputs.cpu().numpy())
+            test_preds = (torch.sigmoid(outputs) > sigmoid).int()
+            TP = ((test_preds == 1) & (y == 1)).sum(dim=1).float()
+            TN = ((test_preds == 0) & (y == 0)).sum(dim=1).float()
+            total_correct = TP + TN
+            total_per_sample = y.size(1)
+            sample_accuracies = total_correct / total_per_sample
+            correct += torch.sum(sample_accuracies).item()
+            test_total += y.size(0) 
+
+            all_preds.append(test_preds.cpu().numpy())
+            all_labels.append(y.cpu().numpy())
+            all_outputs.append(outputs.cpu().numpy())
+
+        all_preds = np.vstack(all_preds)
+        all_labels = np.vstack(all_labels)
+        all_outputs = np.vstack(all_outputs)
     
-    test_acc = correct / total
+    test_acc = correct / test_total
     test_loss /= len(test_loader)
 
     print(f"Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}")
-
+    classes_predicted = np.sum(np.sum(all_preds, axis=0) > 0)
+    print(f"- Test: predicting {classes_predicted} unique classes out of {num_classes}")
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Number of trainable parameters: {num_params}")
 
+    pos_preds_count = np.sum(all_preds > 0)
+    total_preds = all_preds.shape[0] * all_preds.shape[1]
+    print(f"- Test: positive predictions: {pos_preds_count}/{total_preds} ({pos_preds_count/total_preds*100:.2f}%)")
+    print(f"- Test: classes with positive predictions: {np.sum(np.sum(all_preds, axis=0) > 0)}/{all_preds.shape[1]}")
+
+    sigmoid_outputs = 1/(1+np.exp(-np.array(all_outputs)))
+    top_confidence = np.sort(sigmoid_outputs.flatten())[-20:]
+    print(f"- Top 20 confidence scores: {top_confidence}")
+
     all_outputs = np.vstack(all_outputs)
-    proba_outputs = softmax(all_outputs, axis=1)
+    all_labels = np.vstack(all_labels)
+    proba_outputs = torch.sigmoid(torch.tensor(all_outputs)).numpy() 
+    train_counts = {class_name: np.sum(y_train[:, i]) for i, class_name in enumerate(class_names)}
 
     detailed_metrics, summary_metrics = evaluate_temporal_model(
-        proba_outputs, 
-        all_labels, 
-        class_names, 
-        output_dir, 
-        model_name,
+        y_proba =proba_outputs,
+        y_true = all_labels,
+        class_names=class_names,
+        output_dir=output_dir,
+        model_name=model_name,
+        threshold = sigmoid,
         subset=subset,
         short_species=short_species if subset else None,
         medium_species=medium_species if subset else None,
@@ -574,14 +784,15 @@ def train_model(model_type, embeddings_dir, annotations_path, output_dir=None,
         train_counts=train_counts
 )
     
-    wandb.log({
-        "test/accuracy": summary_metrics['accuracy'],
-        "test/mAP": summary_metrics['mAP'],
-        "test/macro_f1": summary_metrics['macro_f1'],
-        "model/parameters": num_params
-    })
+    if use_wandb and wandb.run is not None:
+        wandb.log({
+            "test/mAP": summary_metrics['mAP'],
+            "test/macro_f1": summary_metrics['macro_f1'],
+            "model/parameters": num_params
+        })
 
-    wandb.finish()
+    if use_wandb and wandb.run is not None:
+        wandb.finish()
 
     if output_dir:
         torch.save(model.state_dict(), os.path.join(output_dir, f"best_{model_name}.pt"))
@@ -605,10 +816,9 @@ def train_model(model_type, embeddings_dir, annotations_path, output_dir=None,
         return model, test_acc, summary_metrics, val_loader
 
 if __name__ == "__main__":
-    embeddings_dir = "../dataset/augmented_embeddings"
-    annotations_path = "../dataset/_augmented_embedding_annotations.csv"
-    output_dir = "../results/gru_results"
-    cache_dir = "../cached_data"
+    embeddings_dir = "../dataset/dataset_ctx/embeddings_ctx"
+    annotations_path = "../dataset/dataset_ctx/embedding_annotations_ctx.csv"
+    output_dir = "../results/gru_results_ctx"
 
     aug_gru_model, aug_gru_acc, aug_gru_metrics = train_model(
         model_type='gru',
@@ -620,8 +830,5 @@ if __name__ == "__main__":
         num_layers=1,        
         subset=True,
         return_detailed_metrics=True,
-        epochs = 50,
-        use_smote = True,
-        save_resampled=True,
-        resampled_cache_dir=cache_dir
+        epochs = 50
     )

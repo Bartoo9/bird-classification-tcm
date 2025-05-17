@@ -12,6 +12,7 @@ from collections import Counter
 # 31480 - embeddings
 # Embedding shape: (1024,)
 
+#check for annotations files
 def annotations_from_spectrograms(spectrogram_dir, output_csv="mel_spectrogram_annotations.csv"):
     
     if not os.path.exists(spectrogram_dir):

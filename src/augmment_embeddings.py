@@ -9,6 +9,7 @@ import random
 import matplotlib.pyplot as plt
 from scipy import signal
 
+#used this before but wasnt used in the final evaluations
 def augment_and_embed_selected_species(audio_dir, output_dir, annotation_file, 
                                        target_samples_per_class=None, plot_distribution=True, 
                                        max_augmentations_per_file=50, min_augmentations_per_file=5):
@@ -254,17 +255,17 @@ def create_augmented_audio(input_file, output_file, intensity="medium"):
     
     if intensity == "low":
         pitch_range = (-1, 1)  # Less pitch shift
-        stretch_range = (0.9, 1.1)  # Less time stretching
-        noise_range = (0.0005, 0.002)  # Lower noise
-        gain_range = (0.8, 1.2)  # Less gain change
-        filter_prob = 0.4  # Lower probability of filtering
+        stretch_range = (0.9, 1.1)  
+        noise_range = (0.0005, 0.002)  
+        gain_range = (0.8, 1.2)  
+        filter_prob = 0.4  
     elif intensity == "high":
         pitch_range = (-3, 3)  # More pitch shift
-        stretch_range = (0.8, 1.2)  # More time stretching
-        noise_range = (0.001, 0.008)  # Higher noise
-        gain_range = (0.7, 1.4)  # More gain change
-        filter_prob = 0.7  # Higher probability of filtering
-    else:  # medium (default)
+        stretch_range = (0.8, 1.2)  
+        noise_range = (0.001, 0.008)  
+        gain_range = (0.7, 1.4) 
+        filter_prob = 0.7  
+    else:  
         pitch_range = (-2, 2)
         stretch_range = (0.85, 1.15)
         noise_range = (0.001, 0.005)
@@ -273,7 +274,6 @@ def create_augmented_audio(input_file, output_file, intensity="medium"):
     
     augmented = audio.copy()
     
-    #shift pitches - careful
     if random.random() > 0.3:
         pitch_shift = random.uniform(*pitch_range)
         augmented = librosa.effects.pitch_shift(augmented, sr=sr, n_steps=pitch_shift)
