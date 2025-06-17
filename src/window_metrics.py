@@ -31,7 +31,7 @@ def analyze_window_sizes(ctx_type='bidirectional'):
         'num_layers': 1,
         'subset': True,
         'return_detailed_metrics': True,
-        'epochs': 30,
+        'epochs': 50,
         'ctx_type': ctx_type,
         'downsample': False,
         'dropout': 0.5,
